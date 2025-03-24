@@ -1,0 +1,7 @@
+Flask
+flask-cors
+requests
+SpeechRecognition
+pydub
+twilio
+python-dotenv
