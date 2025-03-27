@@ -96,6 +96,99 @@ def add_attendance(employee_id, today, status):
         return None
 
 
+def get_attendance_filter(emp_id, days=None, from_date=None, to_date=None):
+    """
+    Calls the attendance API endpoint
+
+    Args:
+        emp_id: Employee ID (integer)
+        days: Number of days to look back (optional)
+        from_date: Start date as 'YYYY-MM-DD' string (optional)
+        to_date: End date as 'YYYY-MM-DD' string (optional)
+
+    Returns:
+        Dictionary with attendance data and leave statistics
+    """
+    # Prepare headers with authentication
+    headers = {
+        "x-api-key": "abcdef",
+        "Content-Type": "application/json"
+    }
+
+    # Build query parameters
+    params = {}
+    if days:
+        params["days"] = days
+    if from_date:
+        params["from"] = from_date
+    if to_date:
+        params["to"] = to_date
+
+    # Make the POST request
+    response = requests.post(
+        f"{API_URL}/attendance/{emp_id}",
+        headers=headers,
+        params=params
+    )
+
+    # Handle response
+    if response.status_code == 200:
+        return response.json()
+    else:
+        response.raise_for_status()  # Raises exception for 4XX/5XX errors
+
+
+def format_calendar(data):
+    # Collect all dates with their status
+    date_status = {}
+    for status, dates in data["attendance"].items():
+        for date in dates:
+            date_status[date] = status
+
+    # Group by month
+    months = {}
+    for date_str in sorted(date_status.keys()):
+        date = datetime.strptime(date_str, "%Y-%m-%d")
+        month_key = date.strftime("%Y-%m")
+        if month_key not in months:
+            months[month_key] = []
+        months[month_key].append((date.day, date_status[date_str]))
+
+    # Build calendar
+    calendar = []
+    for month, days in months.items():
+        month_header = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+        calendar.append(f"\n📅 {month_header}")
+        calendar.append("Su Mo Tu We Th Fr Sa")
+
+        # Find first day of month
+        first_date = datetime.strptime(f"{month}-01", "%Y-%m-%d")
+        first_weekday = first_date.weekday()  # Monday is 0
+
+        # Add leading spaces
+        week = ["  "] * first_weekday
+
+        for day, status in days:
+            # Emoji representation
+            emoji = {
+                "PRESENT": "✅",
+                "ABSENT": "❌",
+                "WFH": "🏠"
+            }.get(status, " ")
+
+            week.append(f"{emoji}{day:2}")
+
+            # New week
+            if len(week) == 7:
+                calendar.append(" ".join(week))
+                week = []
+
+        if week:  # Add remaining days
+            calendar.append(" ".join(week))
+
+    return "\n".join(calendar)
+
+
 def get_my_requests(employee_id, status="", request_type="all"):
     api_url = API_URL + "/employees/{}/requests".format(employee_id)
 
@@ -404,10 +497,21 @@ def webhook():
             else:
                 reply = "Failed to mark attendance"
 
+    elif final_message.lower().startswith("my attendance"):
+        employee_id = employee[0].get("id")
+        date_parts = final_message.split()
+        from_index = date_parts.index("from")
+        to_index = date_parts.index("to")
+
+        from_date = date_parts[from_index + 1]
+        to_date = date_parts[to_index + 1]
+
+        reply = format_calendar(get_attendance_filter(emp_id=employee_id, from_date=from_date, to_date=to_date))
+
     elif final_message.lower() == "my request history":
         employee_id = employee[0].get("id")
 
-        request_raised_by_me = get_my_requests(employee_id, "", "approval")
+        request_raised_by_me = get_my_requests(employee_id, "", "created")
 
         if request_raised_by_me:
             request_list = "\n".join(
@@ -424,7 +528,7 @@ def webhook():
     elif final_message.lower() == "my active request":
         employee_id = employee[0].get("id")
 
-        active_request_raised_by_me = get_my_requests(employee_id, "PENDING", "approval")
+        active_request_raised_by_me = get_my_requests(employee_id, "PENDING", "created")
 
         if active_request_raised_by_me:
             request_list = "\n".join(
@@ -498,6 +602,48 @@ def webhook():
                 reply = "Invalid request ID. Please use format 'accept request <ID>'"
 
         else:  # Just "accept request"
+            pending_requests_on_me = get_my_requests(
+                employee_id=employee_id,
+                status="PENDING",
+                request_type="approval"
+            )
+
+            if pending_requests_on_me:
+                request_list = "\n".join(
+                    f"{req['id']}: {req['requestType']} ({req['fromDate']} to {req['toDate']})"
+                    for req in pending_requests_on_me
+                )
+                reply = (
+                    "Pending requests needing approval:\n"
+                    f"{request_list}\n\n"
+                    "Reply with 'accept request <ID>' to approve"
+                )
+            else:
+                reply = "No pending requests require your approval"
+
+    elif final_message.lower().startswith("reject request"):
+        parts = final_message.lower().split()
+        employee_id = employee[0].get("id")
+
+        if len(parts) > 2:  # "accept request 123"
+            try:
+                request_id = int(parts[2])
+                result = update_request_status(
+                    request_id=request_id,
+                    new_status="REJECTED",
+                    user_id=employee_id
+                )
+                print(f"Updated request status: {result}")
+
+                if result and result.get("success", True):
+                    reply = f"Request {request_id} rejected successfully"
+                else:
+                    reply = "Failed to reject request"
+
+            except ValueError:
+                reply = "Invalid request ID. Please use format 'reject request <ID>'"
+
+        else:  # Just "reject request"
             pending_requests_on_me = get_my_requests(
                 employee_id=employee_id,
                 status="PENDING",
